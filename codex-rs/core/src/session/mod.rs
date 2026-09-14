@@ -39,8 +39,6 @@ use crate::image_preparation::ImageResizeNoticeMode;
 use crate::image_preparation::prepare_response_items as prepare_image_response_items;
 use crate::image_preparation::unified_image_budget_enabled;
 use crate::parse_turn_item;
-use crate::realtime_conversation::RealtimeConversationManager;
-use crate::realtime_history::RealtimeEventOrder;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::ResolvedStepSettings;
 use crate::session::step_settings::StepSettings;
@@ -230,7 +228,6 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
-mod realtime_history;
 mod reasoning_effort;
 mod retained_context;
 mod review;
@@ -264,10 +261,8 @@ use self::session::SessionSettingsCommit;
 pub(crate) use self::session::SessionSettingsUpdate;
 #[cfg(test)]
 use self::turn::AssistantMessageStreamParsers;
-use self::turn::agent_message_text;
 #[cfg(test)]
 use self::turn::collect_explicit_app_ids_from_skill_items;
-use self::turn::realtime_text_for_event;
 use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
@@ -2130,10 +2125,6 @@ impl Session {
         self.send_event_raw(event).await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
-        self.maybe_mirror_event_text_to_realtime(&legacy_source)
-            .await;
-        self.maybe_clear_realtime_handoff_for_event(&legacy_source)
-            .await;
 
         let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
         for legacy in legacy_source.as_legacy_events(show_raw_agent_reasoning) {
@@ -2311,60 +2302,6 @@ impl Session {
         }
     }
 
-    async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
-        if self.conversation.running_state().await.is_none() {
-            return;
-        }
-        match msg {
-            EventMsg::ItemStarted(event) => {
-                if let TurnItem::AgentMessage(item) = &event.item {
-                    self.conversation
-                        .register_handoff_stream_item(
-                            item.id.clone(),
-                            item.phase.clone(),
-                            agent_message_text(item),
-                        )
-                        .await;
-                }
-                return;
-            }
-            EventMsg::AgentMessageContentDelta(event) => {
-                if let Err(err) = self
-                    .conversation
-                    .stream_handoff_delta(&event.item_id, event.delta.clone())
-                    .await
-                {
-                    debug!("failed to stream event text to realtime conversation: {err}");
-                }
-                return;
-            }
-            EventMsg::ItemCompleted(event) => {
-                if let TurnItem::AgentMessage(item) = &event.item
-                    && self.conversation.finish_handoff_stream_item(&item.id).await
-                {
-                    return;
-                }
-            }
-            _ => {}
-        }
-        let Some((text, phase)) = realtime_text_for_event(msg) else {
-            return;
-        };
-        if let Err(err) = self.conversation.handoff_out(text, phase).await {
-            debug!("failed to mirror event text to realtime conversation: {err}");
-        }
-    }
-
-    async fn maybe_clear_realtime_handoff_for_event(&self, msg: &EventMsg) {
-        if !matches!(msg, EventMsg::TurnComplete(_)) {
-            return;
-        }
-        if let Err(err) = self.conversation.handoff_complete().await {
-            debug!("failed to finalize realtime handoff output: {err}");
-        }
-        self.conversation.clear_active_handoff().await;
-    }
-
     pub(crate) async fn send_event_raw(&self, event: Event) {
         self.send_event_raw_with_persistence(event, /*persist*/ true)
             .await;
@@ -2384,32 +2321,7 @@ impl Session {
     }
 
     async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
-        // Keep realtime reduction, canonical append, and delivery in the same order.
-        // This lock must not acquire SessionState or ActiveTurn: event producers can
-        // already hold those locks. Host presentation policies are synchronous.
-        let mut realtime_history = match &self.realtime_history {
-            Some(history) => {
-                let history = history.lock().await;
-                history.should_observe(&event.msg).then_some(history)
-            }
-            None => None,
-        };
         self.services.mcp_runtime.observe_event(&event.msg);
-        let (before_event, after_event) = match realtime_history.as_mut() {
-            Some(history) => {
-                let effects = history.observe(&event.msg);
-                match effects.order {
-                    RealtimeEventOrder::BeforeEvent => (Some(effects), None),
-                    RealtimeEventOrder::AfterEvent => (None, Some(effects)),
-                }
-            }
-            None => (None, None),
-        };
-        if let Some(effects) = before_event
-            && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
-        {
-            warn!("failed to persist realtime history: {error}");
-        }
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
@@ -2418,11 +2330,6 @@ impl Session {
         self.services
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
-        if let Some(effects) = after_event
-            && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
-        {
-            warn!("failed to persist realtime history: {error}");
-        }
         self.deliver_event_raw(event).await;
     }
 

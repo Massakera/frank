@@ -1,8 +1,3 @@
-use crate::realtime_conversation::handle_audio as handle_realtime_conversation_audio;
-use crate::realtime_conversation::handle_close as handle_realtime_conversation_close;
-use crate::realtime_conversation::handle_speech as handle_realtime_conversation_speech;
-use crate::realtime_conversation::handle_start as handle_realtime_conversation_start;
-use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
 use async_channel::Receiver;
 use codex_otel::set_parent_from_w3c_trace_context;
 use codex_protocol::protocol::Submission;
@@ -33,8 +28,6 @@ use codex_protocol::protocol::GuardianAssessmentEvent;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RealtimeConversationListVoicesResponseEvent;
-use codex_protocol::protocol::RealtimeVoicesList;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ThreadMemoryMode;
@@ -64,14 +57,14 @@ pub async fn clean_background_terminals(sess: &Arc<Session>) {
     sess.close_unified_exec_processes().await;
 }
 
-pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
+async fn realtime_conversation_removed(sess: &Session, sub_id: String) {
     sess.send_event_raw(Event {
         id: sub_id,
-        msg: EventMsg::RealtimeConversationListVoicesResponse(
-            RealtimeConversationListVoicesResponseEvent {
-                voices: RealtimeVoicesList::builtin(),
-            },
-        ),
+        msg: EventMsg::Error(ErrorEvent {
+            misalignment: None,
+            message: "realtime conversations are not available in Frank".to_string(),
+            codex_error_info: Some(CodexErrorInfo::Other),
+        }),
     })
     .await;
 }
@@ -403,7 +396,6 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
-    let _ = sess.conversation.shutdown().await;
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
     let shell_snapshot_prewarm = sess.state.lock().await.shell_snapshot_prewarm.take();
     if let Some(shell_snapshot_prewarm) = shell_snapshot_prewarm {
@@ -550,40 +542,13 @@ pub(super) async fn submission_loop(
                     clean_background_terminals(&sess).await;
                     false
                 }
-                Op::RealtimeConversationStart(params) => {
-                    if let Err(err) =
-                        handle_realtime_conversation_start(&sess, sub.id.clone(), params).await
-                    {
-                        sess.send_event_raw(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::Error(ErrorEvent {
-                                misalignment: None,
-                                message: err.to_string(),
-                                codex_error_info: Some(CodexErrorInfo::Other),
-                            }),
-                        })
-                        .await;
-                    }
-                    false
-                }
-                Op::RealtimeConversationAudio(params) => {
-                    handle_realtime_conversation_audio(&sess, sub.id.clone(), params).await;
-                    false
-                }
-                Op::RealtimeConversationText(params) => {
-                    handle_realtime_conversation_text(&sess, sub.id.clone(), params).await;
-                    false
-                }
-                Op::RealtimeConversationSpeech(params) => {
-                    handle_realtime_conversation_speech(&sess, sub.id.clone(), params).await;
-                    false
-                }
-                Op::RealtimeConversationClose => {
-                    handle_realtime_conversation_close(&sess, sub.id.clone()).await;
-                    false
-                }
-                Op::RealtimeConversationListVoices => {
-                    realtime_conversation_list_voices(&sess, sub.id.clone()).await;
+                Op::RealtimeConversationStart(_)
+                | Op::RealtimeConversationAudio(_)
+                | Op::RealtimeConversationText(_)
+                | Op::RealtimeConversationSpeech(_)
+                | Op::RealtimeConversationClose
+                | Op::RealtimeConversationListVoices => {
+                    realtime_conversation_removed(&sess, sub.id.clone()).await;
                     false
                 }
                 Op::TurnInput {

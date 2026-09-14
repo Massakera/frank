@@ -13,7 +13,6 @@ mod permissions;
 mod persistent_mode;
 mod personality;
 mod plugins_instructions;
-mod realtime;
 #[cfg(test)]
 mod test_support;
 mod tools;
@@ -53,7 +52,6 @@ pub(crate) use permissions::PermissionsState;
 pub(crate) use persistent_mode::PersistentModeState;
 pub(crate) use personality::PersonalityState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
-pub(crate) use realtime::RealtimeState;
 pub(crate) use tools::ToolsState;
 
 trait ErasedWorldStateSection: Send + Sync {

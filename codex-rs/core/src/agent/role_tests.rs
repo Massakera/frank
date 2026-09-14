@@ -249,7 +249,7 @@ async fn personal_role_allows_symlinked_ancestor_above_agents_directory() {
     let role_path = linked_codex_home.join("agents/company.toml");
     tokio::fs::write(
         real_codex_home.join("agents/company.toml"),
-        "model = \"company-model\"\nmodel_provider = \"ollama\"",
+        "model = \"company-model\"\nmodel_provider = \"amazon-bedrock\"",
     )
     .await
     .expect("write personal role through real Codex home");
@@ -268,7 +268,7 @@ async fn personal_role_allows_symlinked_ancestor_above_agents_directory() {
         .await
         .expect("system-level ancestors may resolve before no-follow read");
 
-    assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider_id, "amazon-bedrock");
 }
 
 #[tokio::test]
@@ -630,7 +630,7 @@ async fn personal_role_can_select_an_existing_model_provider() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let expected_provider = config
         .model_providers
-        .get("ollama")
+        .get("amazon-bedrock")
         .expect("built-in provider should exist")
         .clone();
     let role_path = write_trusted_role_config(
@@ -639,7 +639,7 @@ async fn personal_role_can_select_an_existing_model_provider() {
         r#"developer_instructions = "Use the company worker"
 model = "company-model"
 model_context_window = 262144
-model_provider = "ollama"
+model_provider = "amazon-bedrock"
 "#,
     )
     .await;
@@ -658,7 +658,7 @@ model_provider = "ollama"
 
     assert_eq!(config.model.as_deref(), Some("company-model"));
     assert_eq!(config.model_context_window, Some(262144));
-    assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider_id, "amazon-bedrock");
     assert_eq!(config.model_provider, expected_provider);
     let role_layer = config
         .config_layer_stack
@@ -667,7 +667,7 @@ model_provider = "ollama"
         .expect("role should have a projected layer");
     assert_eq!(
         role_layer.config.get("model_provider"),
-        Some(&TomlValue::String("ollama".to_string()))
+        Some(&TomlValue::String("amazon-bedrock".to_string()))
     );
 }
 

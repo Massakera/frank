@@ -342,8 +342,6 @@ pub enum Feature {
     FastMode,
     /// Enable explicitly requested model changes for later step captures.
     StepModelSwitching,
-    /// Removed compatibility flag. Realtime sessions no longer require a per-thread opt-in.
-    RealtimeConversation,
     /// Prevent idle system sleep while a turn is actively running.
     PreventIdleSleep,
     /// Enable remote compaction v2 over the normal Responses API.
@@ -1667,12 +1665,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::StepModelSwitching,
         key: "step_model_switching",
         stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
-        id: Feature::RealtimeConversation,
-        key: "realtime_conversation",
-        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {

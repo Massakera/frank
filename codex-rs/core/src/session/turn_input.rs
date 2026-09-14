@@ -23,10 +23,6 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AdditionalContextEntry;
-use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::protocol::ErrorEvent;
-use codex_protocol::protocol::Event;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::NonSteerableTurnKind;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::turn_input::NotSubmittedReason;
@@ -40,7 +36,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use uuid::Uuid;
 
 #[cfg(test)]
 #[path = "turn_input_tests.rs"]
@@ -460,45 +455,6 @@ async fn steer(
 }
 
 impl Session {
-    pub(crate) async fn route_realtime_text_input(self: &Arc<Self>, text: String) {
-        let submission_id = Uuid::now_v7().to_string();
-        let submission = handle(
-            self,
-            TurnInputRequest::user_input(vec![UserInput::Text {
-                text,
-                text_elements: Vec::new(),
-            }])
-            .on_start(TurnStartOptions {
-                turn_trigger: Some("realtime".to_string()),
-                ..Default::default()
-            }),
-            TurnInputMode::StartOrSteer,
-            submission_id.clone(),
-        )
-        .await;
-        match submission {
-            Ok(TurnInputSubmission::Started { .. } | TurnInputSubmission::Steered { .. }) => {}
-            Ok(TurnInputSubmission::NotSubmitted { reason }) => {
-                self.send_event_raw(Event {
-                    id: submission_id,
-                    msg: EventMsg::Error(ErrorEvent {
-                        misalignment: None,
-                        message: format!("failed to submit turn input: {reason:?}"),
-                        codex_error_info: Some(CodexErrorInfo::BadRequest),
-                    }),
-                })
-                .await;
-            }
-            Err(error) => {
-                self.send_event_raw(Event {
-                    id: submission_id,
-                    msg: EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
-                })
-                .await;
-            }
-        }
-    }
-
     async fn clear_reserved_idle_turn(&self, turn_state: &Arc<tokio::sync::Mutex<TurnState>>) {
         let mut active_turn_guard = self.active_turn.lock().await;
         if let Some(active_turn) = active_turn_guard.as_ref()
