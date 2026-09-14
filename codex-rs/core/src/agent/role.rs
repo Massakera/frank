@@ -13,19 +13,25 @@ use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::SkillsConfig;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
+use codex_exec_server::LOCAL_FS;
 use codex_exec_server::read_sensitive_file_to_string;
 use codex_features::Feature;
 use codex_features::feature_for_key;
+use codex_file_system::ReadFileOptions;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
@@ -37,6 +43,8 @@ const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not availabl
 struct AgentRoleOverrides {
     developer_instructions: Option<String>,
     model: Option<String>,
+    model_context_window: Option<i64>,
+    model_provider: Option<String>,
     model_reasoning_effort: Option<ReasoningEffort>,
     model_reasoning_summary: Option<ReasoningSummary>,
     model_verbosity: Option<Verbosity>,
@@ -75,11 +83,24 @@ async fn apply_role_to_config_inner(
     let Some(config_file) = role.config_file.as_ref() else {
         return Ok(());
     };
-    let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
+    let (role_layer_toml, may_override_model_settings) =
+        load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
     let role_config = deserialize_config_toml_with_base(role_layer_toml, &config.codex_home)?;
+    let model_context_window = if may_override_model_settings {
+        role_config.model_context_window
+    } else {
+        None
+    };
+    let model_provider = if may_override_model_settings {
+        role_config.model_provider
+    } else {
+        None
+    };
     let mut overrides = AgentRoleOverrides {
         developer_instructions: role_config.developer_instructions,
         model: role_config.model,
+        model_context_window,
+        model_provider,
         model_reasoning_effort: role_config.model_reasoning_effort,
         model_reasoning_summary: role_config.model_reasoning_summary,
         model_verbosity: role_config.model_verbosity,
@@ -133,7 +154,7 @@ async fn load_role_layer_toml(
     config_file: &Path,
     is_built_in: bool,
     role_name: &str,
-) -> anyhow::Result<TomlValue> {
+) -> anyhow::Result<(TomlValue, bool)> {
     let (role_config_toml, role_config_base) = if is_built_in {
         let role_config_contents = built_in::config_file_contents(config_file)
             .map(str::to_owned)
@@ -141,7 +162,14 @@ async fn load_role_layer_toml(
         let role_config_toml: TomlValue = toml::from_str(&role_config_contents)?;
         (role_config_toml, config.codex_home.as_path())
     } else {
-        let role_config_contents = read_sensitive_file_to_string(config_file).await?;
+        let trusted_personal_role_file = trusted_personal_role_file(config, config_file).await;
+        let may_override_model_settings = trusted_personal_role_file.is_some();
+        let role_config_contents =
+            if let Some(trusted_personal_role_file) = trusted_personal_role_file {
+                read_personal_role_file_without_symlinks(&trusted_personal_role_file).await?
+            } else {
+                read_sensitive_file_to_string(config_file).await?
+            };
         let role_config_base = config_file
             .parent()
             .ok_or(anyhow!("No corresponding config content"))?;
@@ -152,14 +180,51 @@ async fn load_role_layer_toml(
             Some(role_name),
         )?
         .config;
-        (role_config_toml, role_config_base)
+        deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)?;
+        return Ok((
+            resolve_relative_paths_in_config_toml(role_config_toml, role_config_base)?,
+            may_override_model_settings,
+        ));
     };
 
     deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)?;
-    Ok(resolve_relative_paths_in_config_toml(
-        role_config_toml,
-        role_config_base,
-    )?)
+    Ok((
+        resolve_relative_paths_in_config_toml(role_config_toml, role_config_base)?,
+        false,
+    ))
+}
+
+/// Provider selection can redirect model-visible source and invoke different credentials, so it
+/// remains session authority for built-in and repository-local roles. A personal role is allowed
+/// to select only an already configured provider when its physical file lives under
+/// `$CODEX_HOME/agents`.
+async fn trusted_personal_role_file(config: &Config, config_file: &Path) -> Option<PathBuf> {
+    let trusted_agents_dir = config.codex_home.join("agents");
+    let relative_role_file = config_file.strip_prefix(&trusted_agents_dir).ok()?;
+    if relative_role_file.as_os_str().is_empty()
+        || relative_role_file
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    let canonical_codex_home = tokio::fs::canonicalize(&config.codex_home).await.ok()?;
+    Some(canonical_codex_home.join("agents").join(relative_role_file))
+}
+
+async fn read_personal_role_file_without_symlinks(config_file: &Path) -> anyhow::Result<String> {
+    let config_file = AbsolutePathBuf::from_absolute_path(config_file)?;
+    let config_file_uri = PathUri::from_abs_path(&config_file);
+    Ok(LOCAL_FS
+        .read_file_text(
+            &config_file_uri,
+            ReadFileOptions {
+                follow_symlinks: false,
+            },
+            /*sandbox*/ None,
+        )
+        .await?)
 }
 
 pub(crate) fn resolve_role_config<'a>(
@@ -184,6 +249,18 @@ mod role_overrides {
         next_config.config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
         if let Some(model) = &overrides.model {
             next_config.model = Some(model.clone());
+        }
+        if let Some(model_context_window) = overrides.model_context_window {
+            next_config.model_context_window = Some(model_context_window);
+        }
+        if let Some(model_provider_id) = &overrides.model_provider {
+            let model_provider = next_config
+                .model_providers
+                .get(model_provider_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("Model provider `{model_provider_id}` not found"))?;
+            next_config.model_provider_id = model_provider_id.clone();
+            next_config.model_provider = model_provider;
         }
         if let Some(instructions) = &overrides.developer_instructions {
             next_config.developer_instructions = Some(instructions.clone());

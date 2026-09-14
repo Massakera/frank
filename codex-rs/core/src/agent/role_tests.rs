@@ -8,6 +8,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_skills_extension::HostSkillsService;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::fs;
@@ -35,6 +36,18 @@ async fn write_role_config(home: &TempDir, name: &str, contents: &str) -> PathBu
     tokio::fs::write(&role_path, contents)
         .await
         .expect("write role config");
+    role_path
+}
+
+async fn write_trusted_role_config(home: &TempDir, name: &str, contents: &str) -> PathBuf {
+    let agents_dir = home.path().join("agents");
+    tokio::fs::create_dir_all(&agents_dir)
+        .await
+        .expect("create personal agents directory");
+    let role_path = agents_dir.join(name);
+    tokio::fs::write(&role_path, contents)
+        .await
+        .expect("write trusted role config");
     role_path
 }
 
@@ -125,6 +138,137 @@ async fn apply_role_rejects_symlinked_role_file() {
         .expect_err("symlinked role file should fail");
 
     assert_eq!(err, AGENT_TYPE_UNAVAILABLE_ERROR);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn untrusted_symlink_to_personal_role_cannot_select_its_provider() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let target = write_trusted_role_config(
+        &home,
+        "company.toml",
+        "model = \"company-model\"\nmodel_provider = \"ollama\"",
+    )
+    .await;
+    let role_path = home.path().join("repository-role.toml");
+    std::os::unix::fs::symlink(target, &role_path).expect("create role symlink");
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    let err = apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect_err("untrusted aliases of personal roles should fail closed");
+
+    assert_eq!(err, AGENT_TYPE_UNAVAILABLE_ERROR);
+    assert_ne!(config.model_provider_id, "ollama");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_personal_agents_directory_cannot_select_its_provider() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let outside_agents_dir = home.path().join("outside-agents");
+    tokio::fs::create_dir_all(&outside_agents_dir)
+        .await
+        .expect("create outside agents directory");
+    let role_path = outside_agents_dir.join("company.toml");
+    tokio::fs::write(
+        &role_path,
+        "model = \"company-model\"\nmodel_provider = \"ollama\"",
+    )
+    .await
+    .expect("write role outside personal agents directory");
+    std::os::unix::fs::symlink(&outside_agents_dir, home.path().join("agents"))
+        .expect("link personal agents directory");
+    config.agent_roles.insert(
+        "company".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(home.path().join("agents/company.toml")),
+            nickname_candidates: None,
+        },
+    );
+
+    let err = apply_role_to_config(&mut config, Some("company"))
+        .await
+        .expect_err("personal roles must not traverse a symlinked agents directory");
+
+    assert_eq!(err, AGENT_TYPE_UNAVAILABLE_ERROR);
+    assert_ne!(config.model_provider_id, "ollama");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn personal_role_rejects_symlinked_directory_below_agents() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let real_role_dir = home.path().join("agents/real");
+    tokio::fs::create_dir_all(&real_role_dir)
+        .await
+        .expect("create real role directory");
+    tokio::fs::write(
+        real_role_dir.join("company.toml"),
+        "model = \"company-model\"\nmodel_provider = \"ollama\"",
+    )
+    .await
+    .expect("write personal role");
+    std::os::unix::fs::symlink(&real_role_dir, home.path().join("agents/alias"))
+        .expect("link nested role directory");
+    config.agent_roles.insert(
+        "company".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(home.path().join("agents/alias/company.toml")),
+            nickname_candidates: None,
+        },
+    );
+
+    let err = apply_role_to_config(&mut config, Some("company"))
+        .await
+        .expect_err("personal roles must not traverse nested symlinks");
+
+    assert_eq!(err, AGENT_TYPE_UNAVAILABLE_ERROR);
+    assert_ne!(config.model_provider_id, "ollama");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn personal_role_allows_symlinked_ancestor_above_agents_directory() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let real_codex_home = home.path().join("real-codex-home");
+    let linked_codex_home = home.path().join("linked-codex-home");
+    tokio::fs::create_dir_all(real_codex_home.join("agents"))
+        .await
+        .expect("create real personal agents directory");
+    std::os::unix::fs::symlink(&real_codex_home, &linked_codex_home).expect("link Codex home");
+    let role_path = linked_codex_home.join("agents/company.toml");
+    tokio::fs::write(
+        real_codex_home.join("agents/company.toml"),
+        "model = \"company-model\"\nmodel_provider = \"ollama\"",
+    )
+    .await
+    .expect("write personal role through real Codex home");
+    config.codex_home =
+        AbsolutePathBuf::from_absolute_path(linked_codex_home).expect("absolute linked Codex home");
+    config.agent_roles.insert(
+        "company".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("company"))
+        .await
+        .expect("system-level ancestors may resolve before no-follow read");
+
+    assert_eq!(config.model_provider_id, "ollama");
 }
 
 #[tokio::test]
@@ -479,6 +623,110 @@ command = "attacker-command"
             "role must not control {key}"
         );
     }
+}
+
+#[tokio::test]
+async fn personal_role_can_select_an_existing_model_provider() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let expected_provider = config
+        .model_providers
+        .get("ollama")
+        .expect("built-in provider should exist")
+        .clone();
+    let role_path = write_trusted_role_config(
+        &home,
+        "company.toml",
+        r#"developer_instructions = "Use the company worker"
+model = "company-model"
+model_context_window = 262144
+model_provider = "ollama"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "company".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("company"))
+        .await
+        .expect("trusted personal role should apply");
+
+    assert_eq!(config.model.as_deref(), Some("company-model"));
+    assert_eq!(config.model_context_window, Some(262144));
+    assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider, expected_provider);
+    let role_layer = config
+        .config_layer_stack
+        .all_layers_low_to_high()
+        .rfind(|layer| layer.name == ConfigLayerSource::SessionFlags)
+        .expect("role should have a projected layer");
+    assert_eq!(
+        role_layer.config.get("model_provider"),
+        Some(&TomlValue::String("ollama".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn personal_role_rejects_an_unknown_model_provider() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let role_path = write_trusted_role_config(
+        &home,
+        "unknown-provider.toml",
+        r#"developer_instructions = "Use the company worker"
+model_provider = "missing-provider"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "company".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    let err = apply_role_to_config(&mut config, Some("company"))
+        .await
+        .expect_err("unknown provider should fail closed");
+
+    assert_eq!(err, AGENT_TYPE_UNAVAILABLE_ERROR);
+}
+
+#[tokio::test]
+async fn repository_role_cannot_override_model_provider_or_context_window() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let original_provider_id = config.model_provider_id.clone();
+    let original_context_window = config.model_context_window;
+    let role_path = write_role_config(
+        &home,
+        "repository-role.toml",
+        r#"developer_instructions = "Use the repository worker"
+model_provider = "ollama"
+model_context_window = 1
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "repository".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("repository"))
+        .await
+        .expect("repository role should apply only non-sensitive overrides");
+
+    assert_eq!(config.model_provider_id, original_provider_id);
+    assert_eq!(config.model_context_window, original_context_window);
 }
 
 #[tokio::test]
