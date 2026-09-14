@@ -1176,9 +1176,7 @@ async fn cli_main(
                     anyhow::bail!("`codex agents` does not accept an initial prompt or images");
                 }
                 if root_remote.is_some()
-                    && (interactive.oss
-                        || interactive.oss_provider.is_some()
-                        || !interactive.add_dir.is_empty()
+                    && (!interactive.add_dir.is_empty()
                         || interactive
                             .config_overrides
                             .parse_overrides()
@@ -1191,7 +1189,7 @@ async fn cli_main(
                             }))
                 {
                     anyhow::bail!(
-                        "`codex agents` cannot apply local provider or additional-directory overrides to a remote server"
+                        "`codex agents` cannot apply additional-directory overrides to a remote server"
                     );
                 }
                 if is_workload_identity_selected() {
@@ -2296,7 +2294,7 @@ async fn run_debug_prompt_input_command(
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
         main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe,
-        show_raw_agent_reasoning: shared.oss.then_some(true),
+        show_raw_agent_reasoning: None,
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
         additional_writable_roots: shared.add_dir,
@@ -4206,7 +4204,6 @@ mod tests {
                 "codex",
                 "resume",
                 "sid",
-                "--oss",
                 "--search",
                 "--sandbox",
                 "workspace-write",
@@ -4226,7 +4223,6 @@ mod tests {
         );
 
         assert_eq!(interactive.model.as_deref(), Some("gpt-5.1-test"));
-        assert!(interactive.oss);
         assert_eq!(interactive.config_profile_v2.as_deref(), Some("my-config"));
         assert_matches!(
             interactive.sandbox_mode,

@@ -616,14 +616,11 @@ fn config_overrides_from_interactive(
         approval_policy,
         sandbox_mode,
         cwd: interactive.cwd.clone(),
-        model_provider: interactive
-            .oss
-            .then(|| interactive.oss_provider.clone())
-            .flatten(),
+        model_provider: None,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
         main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
-        show_raw_agent_reasoning: interactive.oss.then_some(true),
+        show_raw_agent_reasoning: None,
         additional_writable_roots: interactive.add_dir.clone(),
         ..Default::default()
     }
@@ -3132,9 +3129,6 @@ mod tests {
     fn config_overrides_from_interactive_preserves_global_options() {
         let interactive = TuiCli::parse_from([
             "codex",
-            "--oss",
-            "--local-provider",
-            "ollama",
             "--model",
             "llama3.2",
             "--cd",
@@ -3155,11 +3149,11 @@ mod tests {
         let overrides = config_overrides_from_interactive(&interactive, &arg0_paths);
 
         assert_eq!(overrides.model.as_deref(), Some("llama3.2"));
-        assert_eq!(overrides.model_provider.as_deref(), Some("ollama"));
+        assert_eq!(overrides.model_provider, None);
         assert_eq!(overrides.cwd.as_deref(), Some(Path::new("/tmp")));
         assert_eq!(overrides.approval_policy, Some(AskForApproval::Never));
         assert_eq!(overrides.sandbox_mode, Some(SandboxMode::DangerFullAccess));
-        assert_eq!(overrides.show_raw_agent_reasoning, Some(true));
+        assert_eq!(overrides.show_raw_agent_reasoning, None);
         assert_eq!(
             overrides.additional_writable_roots,
             vec![PathBuf::from("/var/tmp")]

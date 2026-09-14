@@ -9,7 +9,7 @@ use codex_model_provider_info::AwsAuthRefreshConfig;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
-use codex_model_provider_info::create_oss_provider_with_base_url;
+use codex_model_provider_info::create_unauthenticated_provider_with_base_url;
 use codex_protocol::protocol::AuthRecoveryEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
@@ -130,8 +130,10 @@ async fn custom_provider_does_not_receive_ambient_auth_headers() -> anyhow::Resu
         "ChatGPT-Account-ID",
         HeaderValue::from_static("account-123"),
     );
-    let provider =
-        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    let provider = create_unauthenticated_provider_with_base_url(
+        &format!("{}/v1", server.uri()),
+        WireApi::Responses,
+    );
     let mut builder = test_codex()
         .with_auth(CodexAuth::Headers(AuthHeaders::new(headers)))
         .with_config(move |config| {
@@ -164,8 +166,10 @@ async fn custom_provider_uses_explicit_bearer_without_ambient_account() -> anyho
         "ChatGPT-Account-ID",
         HeaderValue::from_static("account-123"),
     );
-    let mut provider =
-        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    let mut provider = create_unauthenticated_provider_with_base_url(
+        &format!("{}/v1", server.uri()),
+        WireApi::Responses,
+    );
     provider.experimental_bearer_token = Some("provider-token".into());
     let mut builder = test_codex()
         .with_auth(CodexAuth::Headers(AuthHeaders::new(headers)))

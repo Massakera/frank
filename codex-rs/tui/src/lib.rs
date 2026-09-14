@@ -12,7 +12,6 @@ use crate::legacy_core::config::bootstrap_auth_config;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
 #[cfg(test)]
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
-use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::session_resume::ResolveCwdOutcome;
 use crate::session_resume::ResumeCwdContext;
@@ -72,8 +71,6 @@ use codex_state::log_db;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_home_dir::find_codex_home;
-use codex_utils_oss::ensure_oss_provider_ready;
-use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
 pub use session_archive_commands::DeleteConfirmation;
@@ -178,7 +175,6 @@ mod notifications;
 #[cfg(any(not(debug_assertions), test))]
 mod npm_registry;
 pub(crate) mod onboarding;
-mod oss_selection;
 mod pager_overlay;
 pub(crate) mod public_widgets;
 mod render;
@@ -1040,7 +1036,6 @@ async fn run_ratatui_app(
     mut app_server_target: AppServerTarget,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
-    manually_selected_oss_provider: Option<String>,
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     mut cloud_config_bundle: CloudConfigBundleLoader,
@@ -1131,32 +1126,6 @@ async fn run_ratatui_app(
         }
     }
     .with_remote_cwd_override(remote_cwd_override.clone());
-    if let Some(provider) = manually_selected_oss_provider.as_deref() {
-        match startup_draft
-            .run_until(
-                &mut tui,
-                config_update::write_config_batch(
-                    app_server_session.request_handle(),
-                    vec![config_update::build_oss_provider_edit(provider)],
-                ),
-            )
-            .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => {
-                warn!(
-                    %err,
-                    provider,
-                    "Failed to persist selected OSS provider preference"
-                );
-            }
-            Err(err) => {
-                shutdown_startup_session(Some(app_server_session), &mut terminal_restore_guard)
-                    .await;
-                return Err(err.into());
-            }
-        }
-    }
     let remote_project_trust =
         if uses_remote_workspace && let Some(remote_cwd) = remote_cwd_override.as_deref() {
             match startup_draft
