@@ -36,17 +36,21 @@ jobs:
       - name: Test role routing
         run: cargo test --profile dev-small -p codex-core agent::role
       - name: Build Frank
-        run: cargo build --profile dev-small -p codex-cli --bin codex
+        run: |
+          cargo build --profile dev-small -p codex-cli --bin codex
+          cargo build --profile dev-small -p codex-code-mode-host --bin codex-code-mode-host
       - name: Stage Frank
         run: |
           install -Dm755 target/dev-small/codex dist/frank
+          install -Dm755 target/dev-small/codex-code-mode-host dist/codex-code-mode-host
           cd dist
-          sha256sum frank > frank.sha256
+          sha256sum frank codex-code-mode-host > frank.sha256
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: frank-linux-x86_64-${{ github.sha }}
           path: |
             codex-rs/dist/frank
+            codex-rs/dist/codex-code-mode-host
             codex-rs/dist/frank.sha256
           if-no-files-found: error
           retention-days: 7
